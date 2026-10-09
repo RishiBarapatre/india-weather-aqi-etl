@@ -34,3 +34,6 @@ data/raw/*.csv
 .pytest_cache/
 .coverage
 htmlcov/
+
+# PDF documentation
+*.pdf
