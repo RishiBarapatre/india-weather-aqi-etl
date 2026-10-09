@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Python dependencies for the Weather & AQI ETL pipeline
+#  Install inside Airflow image via docker/Dockerfile.airflow
+# ─────────────────────────────────────────────────────────────────────────────
+
+# HTTP & retry
+requests==2.32.3
+tenacity==8.3.0
+
+# Data manipulation
+pandas==2.2.2
+
+# Fuzzy string matching (city name reconciliation)
+rapidfuzz==3.9.3
+
+# Database connectors
+psycopg2-binary==2.9.9        # PostgreSQL
+pymongo==4.8.0                # MongoDB
+
+# Airflow extra providers (already available in the official image,
+# but pinned here for documentation clarity)
+apache-airflow-providers-postgres==5.11.0
+apache-airflow-providers-mongo==4.0.0
+
+# Testing
+pytest==8.2.2
+pytest-mock==3.14.0
+responses==0.25.3             # Mock HTTP responses in tests

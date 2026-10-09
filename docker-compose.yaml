@@ -1,0 +1,196 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  docker-compose.yaml — India Weather & AQI ETL Pipeline
+#
+#  Services:
+#    postgres          → Airflow's internal metadata database
+#    warehouse-postgres → Our data warehouse (star schema lives here)
+#    mongo             → Raw / staging zone (verbatim API responses)
+#    mongo-express     → Web UI to browse MongoDB (port 8081)
+#    adminer           → Web UI for both Postgres databases (port 8082)
+#    airflow-init      → One-shot initialisation job (DB migrate + admin user)
+#    airflow-webserver → Airflow UI (port 8080)
+#    airflow-scheduler → Airflow scheduler
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.airflow
+    args:
+      AIRFLOW_IMAGE_NAME: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.9.3}
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    PYTHONPATH: /opt/airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres/${AIRFLOW_DB_NAME:-airflow}
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+    # Make our warehouse and mongo credentials available to DAGs
+    WAREHOUSE_POSTGRES_HOST: ${WAREHOUSE_POSTGRES_HOST:-warehouse-postgres}
+    WAREHOUSE_POSTGRES_PORT: ${WAREHOUSE_POSTGRES_PORT:-5432}
+    WAREHOUSE_POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+    WAREHOUSE_POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_secret}
+    WAREHOUSE_POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-weather_aqi_dwh}
+    MONGO_HOST: ${MONGO_HOST:-mongo}
+    MONGO_PORT: ${MONGO_PORT:-27017}
+    MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-root}
+    MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-mongo_secret}
+    MONGO_DB: ${MONGO_DB:-weather_aqi_raw}
+    WAQI_TOKEN: ${WAQI_TOKEN:-}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./include:/opt/airflow/include
+    - ./data:/opt/airflow/data
+    - ./sql:/opt/airflow/sql
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  depends_on:
+    postgres:
+      condition: service_healthy
+  networks:
+    - etl-network
+
+services:
+
+  # ── Airflow metadata database ──────────────────────────────────────────────
+  postgres:
+    image: postgres:16
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER:-airflow}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME:-airflow}
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${AIRFLOW_DB_USER:-airflow}"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    networks:
+      - etl-network
+
+  # ── Data Warehouse database ────────────────────────────────────────────────
+  warehouse-postgres:
+    image: postgres:16
+    container_name: warehouse-postgres
+    environment:
+      POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse}
+      POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-warehouse_secret}
+      POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-weather_aqi_dwh}
+    ports:
+      - "5433:5432"    # Exposed on 5433 to avoid clash with local Postgres
+    volumes:
+      - warehouse-postgres-data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d   # Auto-run DDL on first boot
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${WAREHOUSE_POSTGRES_USER:-warehouse}"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    networks:
+      - etl-network
+
+  # ── MongoDB raw zone ───────────────────────────────────────────────────────
+  mongo:
+    image: mongo:7
+    container_name: mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-mongo_secret}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - etl-network
+
+  # ── Mongo Express (MongoDB Web UI) ─────────────────────────────────────────
+  mongo-express:
+    image: mongo-express:1.0.2
+    container_name: mongo-express
+    restart: always
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: ${MONGO_INITDB_ROOT_USERNAME:-root}
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-mongo_secret}
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_INITDB_ROOT_USERNAME:-root}:${MONGO_INITDB_ROOT_PASSWORD:-mongo_secret}@mongo:27017/
+      ME_CONFIG_BASICAUTH: "false"
+    depends_on:
+      - mongo
+    networks:
+      - etl-network
+
+  # ── Adminer (Postgres Web UI) ──────────────────────────────────────────────
+  adminer:
+    image: adminer:4.8.1
+    container_name: adminer
+    restart: always
+    ports:
+      - "8082:8080"
+    networks:
+      - etl-network
+
+  # ── Airflow init (runs once) ───────────────────────────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username ${_AIRFLOW_WWW_USER_USERNAME:-admin} \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+    restart: "no"
+
+  # ── Airflow Webserver ──────────────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ── Airflow Scheduler ──────────────────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+# ── Named volumes ──────────────────────────────────────────────────────────────
+volumes:
+  airflow-postgres-data:
+  warehouse-postgres-data:
+  mongo-data:
+
+# ── Network ────────────────────────────────────────────────────────────────────
+networks:
+  etl-network:
+    driver: bridge
